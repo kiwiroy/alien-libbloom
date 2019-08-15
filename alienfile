@@ -1,0 +1,76 @@
+# -*- mode: perl; -*-
+
+use strict;
+use warnings;
+use alienfile;
+use Path::Tiny qw{path};
+use Alien::Build::CommandSequence;
+use Data::Dumper;
+
+probe [ 'pkg-config --exists libbloom' ];
+
+share {
+    # CI or cpantesters?
+    if ($ENV{CI}) {
+        my $bloom_version = $ENV{ALIEN_BLOOM_TEST_VERSION};
+        start_url "https://github.com/jvirkki/libbloom/archive/v${bloom_version}.tar.gz";
+
+        plugin Download => ( version => qr/([0-9\.]+)/, bootstrap_ssl => 1 );
+    } else {
+        plugin 'Download::GitHub' => (
+            github_user => 'jvirkki',
+            github_repo => 'libbloom',
+            );
+    }
+    
+    plugin Extract =>
+        (format => 'tar.gz');
+    
+    
+    plugin 'Build::Make' => 'gmake';
+    # Available targets:
+    # ------------------
+    # clean
+    # test
+    # perf
+    # collision_test
+ 
+    build [
+        '%{make}',
+        sub {
+            my ($build, @dirs) = (shift);
+            my $stage = path($build->{install_prop}->{stage});
+            my @libfiles = map { $_->basename } path('build')->children(qr/libbloom\.(?:a|so).*/);
+            my %fileset = (
+                (map { $_ => path('include')->child($_)->stringify } qw{bloom.h}),
+                (map { ("build/$_" => path('lib')->child($_)->stringify) } @libfiles)
+                );
+            $build->log("copy stuff to $stage");
+
+            push @dirs, $stage->child($_)->stringify
+                for (qw{include lib bin});
+
+            Alien::Build::CommandSequence->new(
+                (map { join ' ', '%{install} -d', $_ } @dirs),
+                (map {
+                    join ' ', '%{install} -c', $_, $stage->child($fileset{$_})->stringify
+                 } keys %fileset),
+                )->execute($build);
+        }
+        ];
+
+    test [
+        '%{make} test'
+        ];
+
+    plugin 'Gather::IsolateDynamic';
+
+    after gather => sub {
+        my $build = shift;
+        my $prefix = $build->runtime_prop->{prefix};
+        $build->runtime_prop->{cflags} = "-I$prefix/include";
+        $build->runtime_prop->{libs}   = "-L$prefix/dynamic -lbloom";
+        $build->runtime_prop->{libs_static} = "-L$prefix/lib -lbloom";
+
+    };
+};
